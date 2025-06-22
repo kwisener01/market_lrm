@@ -232,77 +232,156 @@ class RegimeAgent(LRMAgent):
     def __init__(self, anthropic_client: Anthropic, learning_system: AgentLearningSystem):
         super().__init__("Regime", anthropic_client, learning_system)
     
-    def analyze(self, market_data: Dict, learning_context: str = "") -> AgentResponse:
-        system_prompt = f"""You are a Market Regime Detection specialist with deep expertise in macroeconomic analysis.
-
-Your role is to identify the current market regime and its implications for SPY trading.
-
-Key responsibilities:
-- Analyze market volatility patterns and regime shifts
-- Assess macroeconomic conditions and policy impacts
-- Identify bull/bear/sideways market phases
-- Evaluate market stress indicators
-- Consider intermarket relationships
-
-Learning Context from your past performance:
-{learning_context}
-
-Output format:
-- Regime classification (BULL/BEAR/SIDEWAYS/TRANSITION)
-- Confidence level (0-1)
-- Key supporting factors
-- Risk considerations
-- Trading signal bias (BUY/SELL/HOLD/SHORT)
-
-Be specific about regime characteristics and provide actionable insights."""
+    def _truncate_learning_context(self, learning_context: str, max_tokens: int = 30000) -> str:
+        """Truncate learning context to prevent token overflow"""
+        if not learning_context:
+            return ""
         
-        user_prompt = f"""Analyze the current market regime based on this data:
-
-SPY Price Data: {market_data.get('spy_current', {})}
-VIX Level: {market_data.get('vix_current', 'N/A')}
-Treasury Yields: {market_data.get('yields', {})}
-Economic Indicators: {market_data.get('economic', {})}
-Technical Indicators: {market_data.get('technicals', {})}
-
-Provide regime analysis with confidence level and trading implications."""
+        # Estimate tokens (roughly 4 chars per token)
+        estimated_tokens = len(learning_context) / 4
         
-        response_text = self._make_api_call(system_prompt, user_prompt)
+        if estimated_tokens <= max_tokens:
+            return learning_context
         
-        # Parse response for structured data
-        signal = "HOLD"  # Default
-        confidence = 0.5  # Default
+        # Keep most recent context
+        target_chars = max_tokens * 4
+        if len(learning_context) > target_chars:
+            truncated = learning_context[-int(target_chars):]
+            # Find good breaking point
+            if '\n\n' in truncated:
+                truncated = truncated[truncated.find('\n\n')+2:]
+            elif '. ' in truncated and len(truncated) > 1000:
+                truncated = truncated[truncated.find('. ')+2:]
+            
+            return f"[RECENT LEARNING CONTEXT]\n{truncated}"
         
-        if "BUY" in response_text.upper():
-            signal = "BUY"
-        elif "SELL" in response_text.upper():
-            signal = "SELL"
-        elif "SHORT" in response_text.upper():
-            signal = "SHORT"
-        
-        # Extract confidence if mentioned
+        return learning_context
+    
+    def _extract_key_data(self, market_data: Dict) -> str:
+        """Extract only essential market data to minimize tokens"""
         try:
-            import re
-            conf_match = re.search(r'confidence[:\s]*([0-9.]+)', response_text.lower())
-            if conf_match:
-                confidence = min(1.0, max(0.0, float(conf_match.group(1))))
-        except:
-            pass
+            # Get core values safely
+            spy_price = market_data.get('spy_current', {}).get('Close', 'N/A')
+            vix_level = market_data.get('vix_current', {}).get('Close', 'N/A')
+            
+            # Summarize yields (just key ones)
+            yields = market_data.get('yields', {})
+            yield_summary = f"10Y: {yields.get('10Y', 'N/A')}, 2Y: {yields.get('2Y', 'N/A')}"
+            
+            # Limit technical indicators to essentials
+            technicals = market_data.get('technicals', {})
+            tech_summary = str({k: v for k, v in list(technicals.items())[:5]})[:200] + "..."
+            
+            # Limit economic indicators
+            economic = market_data.get('economic', {})
+            econ_summary = str({k: v for k, v in list(economic.items())[:3]})[:150] + "..."
+            
+            return f"""SPY: {spy_price} | VIX: {vix_level}
+Yields: {yield_summary}
+Technicals: {tech_summary}
+Economic: {econ_summary}"""
+            
+        except Exception as e:
+            return f"Data extraction error: {str(e)}"
+    
+    def analyze(self, market_data: Dict, learning_context: str = "") -> AgentResponse:
+        # Truncate learning context to stay under token limits
+        truncated_context = self._truncate_learning_context(learning_context, 25000)
         
-        features = {
-            'vix_level': market_data.get('vix_current', {}).get('Close', 20),
-            'spy_price': market_data.get('spy_current', {}).get('Close', 400),
-            'regime_type': 'analysis_based'
-        }
-        
-        return AgentResponse(
-            agent_name=self.name,
-            analysis=response_text,
-            signal=signal,
-            confidence=confidence,
-            features=features,
-            learning_feedback=""
-        )
+        # Compact system prompt
+        system_prompt = f"""Market Regime Specialist - Identify SPY trading regime.
 
+ANALYZE: Volatility patterns, macro conditions, bull/bear phases, stress indicators.
+
+{truncated_context}
+
+OUTPUT FORMAT:
+- Regime: [BULL/BEAR/SIDEWAYS/TRANSITION]  
+- Confidence: [0.0-1.0]
+- Signal: [BUY/SELL/HOLD/SHORT]
+- Key factors (3-4 points)
+
+Be concise and actionable."""
+
+        # Compact user prompt with essential data only
+        key_data = self._extract_key_data(market_data)
+        user_prompt = f"""Market Data:
+{key_data}
+
+Analyze regime with confidence level and trading signal."""
+        
+        try:
+            response_text = self._make_api_call(system_prompt, user_prompt)
+            
+            # Enhanced signal parsing
+            signal = "HOLD"
+            response_upper = response_text.upper()
+            
+            if "BUY" in response_upper and "SELL" not in response_upper:
+                signal = "BUY"
+            elif "SELL" in response_upper:
+                signal = "SELL"
+            elif "SHORT" in response_upper:
+                signal = "SHORT"
+            
+            # Enhanced confidence extraction
+            confidence = 0.5
+            try:
+                import re
+                patterns = [
+                    r'confidence[:\s]*([0-9.]+)',
+                    r'([0-9.]+)\s*confidence',
+                    r'level[:\s]*([0-9.]+)'
+                ]
+                
+                for pattern in patterns:
+                    match = re.search(pattern, response_text.lower())
+                    if match:
+                        conf_val = float(match.group(1))
+                        if conf_val > 1:  # Handle percentage
+                            conf_val = conf_val / 100
+                        confidence = min(1.0, max(0.0, conf_val))
+                        break
+            except:
+                pass
+            
+            # Safe feature extraction
+            features = {
+                'vix_level': self._safe_extract_float(market_data, ['vix_current', 'Close'], 20.0),
+                'spy_price': self._safe_extract_float(market_data, ['spy_current', 'Close'], 400.0),
+                'regime_type': 'analysis_based',
+                'token_estimate': (len(system_prompt + user_prompt)) // 4
+            }
+            
+            return AgentResponse(
+                agent_name=self.name,
+                analysis=response_text,
+                signal=signal,
+                confidence=confidence,
+                features=features,
+                learning_feedback=""
+            )
+            
+        except Exception as e:
+            # Fallback response on error
+            return AgentResponse(
+                agent_name=self.name,
+                analysis=f"Regime analysis failed: {str(e)}",
+                signal="HOLD",
+                confidence=0.3,
+                features={'error': True, 'vix_level': 20.0, 'spy_price': 400.0},
+                learning_feedback=""
+            )
+    
+    def _safe_extract_float(self, data: Dict, keys: list, default: float) -> float:
+        """Safely extract float from nested dictionary"""
+        try:
+            value = data
+            for key in keys:
+                value = value.get(key, {})
+            return float(value) if isinstance(value, (int, float)) else default
+        except:
+            return default
 class TechnicalAgent(LRMAgent):
     """Technical analysis agent"""
     
