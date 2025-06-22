@@ -87,7 +87,8 @@ class DataProvider:
     
     def _calculate_rsi(self, prices: pd.Series, period: int = 14) -> pd.Series:
         """Calculate RSI"""
-        delta = prices.diff()
+        prices = prices.astype(float)
+        delta = prices.diff().astype(float)
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
         rs = gain / loss
@@ -142,7 +143,7 @@ class AgentLearningSystem:
         conn.close()
     
     def store_performance(self, agent_name: str, signal: str, confidence: float, 
-                         features: Dict, actual_outcome: float = None):
+                         features: Dict, actual_outcome: Optional[float] = None):
         """Store agent performance for learning"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -222,7 +223,7 @@ class LRMAgent:
             st.error(f"API call failed for {self.name}: {str(e)}")
             return f"Error in {self.name} analysis: {str(e)}"
     
-    def update_learning(self, signal: str, confidence: float, features: Dict, outcome: float = None):
+    def update_learning(self, signal: str, confidence: float, features: Dict, outcome: Optional[float] = None):
         """Update agent's learning based on performance"""
         self.learning_system.store_performance(self.name, signal, confidence, features, outcome)
 
@@ -285,8 +286,11 @@ Economic: {econ_summary}"""
             return f"Data extraction error: {str(e)}"
     
     def analyze(self, market_data: Dict, learning_context: str = "") -> AgentResponse:
+        print(f"[{self.name}] Starting analysis...")
+        
         # Truncate learning context to stay under token limits
         truncated_context = self._truncate_learning_context(learning_context, 25000)
+        print(f"[{self.name}] Learning context length: {len(truncated_context)} chars")
         
         # Compact system prompt
         system_prompt = f"""Market Regime Specialist - Identify SPY trading regime.
@@ -310,8 +314,30 @@ Be concise and actionable."""
 
 Analyze regime with confidence level and trading signal."""
         
+        # Token estimation and logging
+        total_tokens = (len(system_prompt) + len(user_prompt)) // 4
+        print(f"[{self.name}] Estimated tokens: {total_tokens}")
+        
+        if total_tokens > 190000:  # Safety margin
+            print(f"[{self.name}] WARNING: Token count too high, further truncating...")
+            truncated_context = self._truncate_learning_context(learning_context, 10000)
+            system_prompt = f"""Market Regime Specialist - Identify SPY trading regime.
+
+{truncated_context}
+
+OUTPUT: Regime [BULL/BEAR/SIDEWAYS/TRANSITION], Confidence [0.0-1.0], Signal [BUY/SELL/HOLD/SHORT]"""
+        
         try:
+            print(f"[{self.name}] Making API call...")
             response_text = self._make_api_call(system_prompt, user_prompt)
+            print(f"[{self.name}] API response received: {len(response_text) if response_text else 0} chars")
+            
+            # Check if we got a valid response
+            if not response_text or len(response_text.strip()) == 0:
+                print(f"[{self.name}] WARNING: Empty response from API")
+                return self._create_fallback_response("Empty API response")
+            
+            print(f"[{self.name}] Processing response...")
             
             # Enhanced signal parsing
             signal = "HOLD"
@@ -323,6 +349,8 @@ Analyze regime with confidence level and trading signal."""
                 signal = "SELL"
             elif "SHORT" in response_upper:
                 signal = "SHORT"
+            
+            print(f"[{self.name}] Extracted signal: {signal}")
             
             # Enhanced confidence extraction
             confidence = 0.5
@@ -342,16 +370,20 @@ Analyze regime with confidence level and trading signal."""
                             conf_val = conf_val / 100
                         confidence = min(1.0, max(0.0, conf_val))
                         break
-            except:
-                pass
+            except Exception as conf_error:
+                print(f"[{self.name}] Confidence extraction error: {conf_error}")
+            
+            print(f"[{self.name}] Extracted confidence: {confidence}")
             
             # Safe feature extraction
             features = {
                 'vix_level': self._safe_extract_float(market_data, ['vix_current', 'Close'], 20.0),
                 'spy_price': self._safe_extract_float(market_data, ['spy_current', 'Close'], 400.0),
                 'regime_type': 'analysis_based',
-                'token_estimate': (len(system_prompt + user_prompt)) // 4
+                'token_estimate': total_tokens
             }
+            
+            print(f"[{self.name}] Analysis complete successfully")
             
             return AgentResponse(
                 agent_name=self.name,
@@ -363,15 +395,20 @@ Analyze regime with confidence level and trading signal."""
             )
             
         except Exception as e:
-            # Fallback response on error
-            return AgentResponse(
-                agent_name=self.name,
-                analysis=f"Regime analysis failed: {str(e)}",
-                signal="HOLD",
-                confidence=0.3,
-                features={'error': True, 'vix_level': 20.0, 'spy_price': 400.0},
-                learning_feedback=""
-            )
+            print(f"[{self.name}] ERROR: {str(e)}")
+            return self._create_fallback_response(f"Analysis error: {str(e)}")
+    
+    def _create_fallback_response(self, error_msg: str) -> AgentResponse:
+        """Create a safe fallback response when analysis fails"""
+        print(f"[{self.name}] Creating fallback response: {error_msg}")
+        return AgentResponse(
+            agent_name=self.name,
+            analysis=f"Regime analysis unavailable: {error_msg}. Using conservative HOLD position.",
+            signal="HOLD",
+            confidence=0.3,
+            features={'error': True, 'vix_level': 20.0, 'spy_price': 400.0},
+            learning_feedback=""
+        )
     
     def _safe_extract_float(self, data: Dict, keys: list, default: float) -> float:
         """Safely extract float from nested dictionary"""
@@ -382,6 +419,8 @@ Analyze regime with confidence level and trading signal."""
             return float(value) if isinstance(value, (int, float)) else default
         except:
             return default
+            
+            
 class TechnicalAgent(LRMAgent):
     """Technical analysis agent"""
     
