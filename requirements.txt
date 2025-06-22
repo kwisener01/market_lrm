@@ -3,4 +3,4 @@ pandas
 numpy
 yfinance
 anthropic
-sklearn
+scikit-learn
