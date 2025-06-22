@@ -4,3 +4,4 @@ numpy
 yfinance
 anthropic
 scikit-learn
+plotly
