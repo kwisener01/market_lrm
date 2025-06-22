@@ -1,16 +1,3 @@
-# Core dependencies
-streamlit==1.28.1
-numpy>=1.23.2,<=2.1.3
-pandas==1.5.3
-
-# Financial data and APIs
-yfinance==0.2.18
-requests==2.28.2
-anthropic==0.25.0
-
-# Machine Learning
-scikit-learn==1.2.2
-plotly==5.12.0
-
-# Optional utilities
-python-dotenv==1.0.0
+streamlit
+pandas
+numpy
